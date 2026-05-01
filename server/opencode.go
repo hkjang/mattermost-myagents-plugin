@@ -62,6 +62,8 @@ type openCodeStreamState struct {
 	MessageID string
 	Text      string
 	Thinking  string
+	Tools     []string
+	PartTypes map[string]string
 	Done      bool
 }
 
@@ -118,7 +120,7 @@ func (p *Plugin) streamOpenCodeMessage(ctx context.Context, cfg *runtimeConfigur
 			if !applyOpenCodeSSEEvent(&state, sessionID, event) {
 				continue
 			}
-			rendered := renderStreamingMessage(state.Text, state.Thinking, !state.Done)
+			rendered := renderStreamingMessage(state.Text, state.Thinking, state.Tools, !state.Done)
 			if rendered != "" && rendered != lastRendered {
 				if err := updater.update(rendered, state.Thinking, !state.Done); err != nil {
 					return "", err
@@ -280,7 +282,7 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 		return true
 	case "message_delta":
 		if data, ok := payload.(map[string]any); ok {
-			if delta := firstTextField(data, "delta", "text", "content"); delta != "" {
+			if delta := firstRawTextField(data, "delta", "text", "content"); delta != "" {
 				state.Text += delta
 				return true
 			}
@@ -297,7 +299,14 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 
 	envelope := normalizeOpenCodeEventPayload(payload)
 	if envelope == nil {
-		return false
+		if eventName == "message.part.updated" || eventName == "message.part.delta" || eventName == "message.updated" || eventName == "session.idle" || eventName == "session.error" {
+			envelope = map[string]any{
+				"type":       eventName,
+				"properties": payload,
+			}
+		} else {
+			return false
+		}
 	}
 	eventType := stringValue(envelope["type"])
 	props, _ := envelope["properties"].(map[string]any)
@@ -307,35 +316,60 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 		if part == nil || stringValue(part["sessionID"]) != sessionID {
 			return false
 		}
-		delta := stringValue(props["delta"])
+		rememberOpenCodePartType(state, part)
+		delta := rawStringValue(props["delta"])
 		partType := stringValue(part["type"])
 		switch partType {
 		case "text":
 			if delta != "" {
 				state.Text += delta
-			} else if text := stringValue(part["text"]); text != "" {
+			} else if text := rawStringValue(part["text"]); text != "" {
 				state.Text = text
 			}
 			return true
 		case "reasoning":
 			if delta != "" {
 				state.Thinking += delta
-			} else if text := stringValue(part["text"]); text != "" {
+			} else if text := rawStringValue(part["text"]); text != "" {
 				state.Thinking = text
 			}
 			return true
 		case "tool":
 			if label := renderToolPart(part); label != "" {
-				if !strings.Contains(state.Text, label) {
-					state.Text = strings.TrimSpace(state.Text + "\n\n" + label)
+				if !containsString(state.Tools, label) {
+					state.Tools = append(state.Tools, label)
 					return true
 				}
 			}
 		}
+	case "message.part.delta":
+		if props == nil || stringValue(props["sessionID"]) != sessionID {
+			return false
+		}
+		if field := stringValue(props["field"]); field != "" && field != "text" {
+			return false
+		}
+		delta := rawStringValue(props["delta"])
+		if delta == "" {
+			return false
+		}
+		partType := openCodePartType(state, stringValue(props["partID"]))
+		if partType == "reasoning" {
+			state.Thinking += delta
+			return true
+		}
+		if partType == "tool" || partType == "file" {
+			return false
+		}
+		state.Text += delta
+		return true
 	case "message.updated":
 		info, _ := props["info"].(map[string]any)
 		if info == nil || stringValue(info["sessionID"]) != sessionID {
 			return false
+		}
+		if text := extractOpenCodeTextFromEventProperties(props); text != "" {
+			state.Text = text
 		}
 		if stringValue(info["role"]) == "assistant" {
 			if timeInfo, ok := info["time"].(map[string]any); ok && timeInfo["completed"] != nil {
@@ -356,6 +390,36 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 		}
 	}
 	return false
+}
+
+func rememberOpenCodePartType(state *openCodeStreamState, part map[string]any) {
+	partID := firstTextField(part, "id", "partID")
+	partType := stringValue(part["type"])
+	if partID == "" || partType == "" {
+		return
+	}
+	if state.PartTypes == nil {
+		state.PartTypes = map[string]string{}
+	}
+	state.PartTypes[partID] = partType
+}
+
+func openCodePartType(state *openCodeStreamState, partID string) string {
+	if state.PartTypes == nil || partID == "" {
+		return ""
+	}
+	return state.PartTypes[partID]
+}
+
+func extractOpenCodeTextFromEventProperties(props map[string]any) string {
+	for _, key := range []string{"parts", "message", "data"} {
+		if value, ok := props[key]; ok {
+			if text := extractOpenCodeAnswerText(value); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func normalizeOpenCodeEventPayload(payload any) map[string]any {
@@ -398,7 +462,7 @@ func renderToolPart(part map[string]any) string {
 	return fmt.Sprintf("> 도구 호출: `%s`", label)
 }
 
-func renderStreamingMessage(text, thinking string, streaming bool) string {
+func renderStreamingMessage(text, thinking string, tools []string, streaming bool) string {
 	visibleText, completedThinking, activeThinking := splitThinkBlocks(text)
 	if activeThinking != "" {
 		thinking = strings.TrimSpace(thinking + "\n" + activeThinking)
@@ -417,6 +481,11 @@ func renderStreamingMessage(text, thinking string, streaming bool) string {
 	thinking = strings.TrimSpace(removeThinkTags(thinking))
 	if thinking != "" {
 		blocks = append(blocks, fmt.Sprintf("<div class=\"myagents-thinking\">%s</div>", thinking))
+	}
+	for _, tool := range tools {
+		if strings.TrimSpace(tool) != "" {
+			blocks = append(blocks, tool)
+		}
 	}
 	blocks = append(blocks, text)
 	return strings.TrimSpace(strings.Join(blocks, "\n\n"))
@@ -543,6 +612,38 @@ func extractOpenCodeText(value any) string {
 	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
+func extractOpenCodeAnswerText(value any) string {
+	parts := make([]string, 0)
+	collectOpenCodeAnswerText(value, &parts)
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func collectOpenCodeAnswerText(value any, parts *[]string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		partType := strings.ToLower(stringValue(typed["type"]))
+		if partType == "text" {
+			if text := firstTextField(typed, "text", "content", "message"); text != "" {
+				*parts = append(*parts, text)
+				return
+			}
+		}
+		if partType == "reasoning" || partType == "tool" || partType == "file" {
+			return
+		}
+		for key, nested := range typed {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "parts" || lowerKey == "messages" || lowerKey == "message" || lowerKey == "content" || lowerKey == "data" {
+				collectOpenCodeAnswerText(nested, parts)
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			collectOpenCodeAnswerText(item, parts)
+		}
+	}
+}
+
 func collectOpenCodeParts(value any, parts *[]string) {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -589,6 +690,25 @@ func firstTextField(values map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstRawTextField(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if text := rawStringValue(values[key]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func containsString(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyOpenCodeHTTPError(statusCode int) error {
@@ -639,6 +759,17 @@ func stringValue(value any) string {
 		return ""
 	default:
 		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func rawStringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(typed)
 	}
 }
 

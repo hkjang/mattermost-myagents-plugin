@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,15 @@ import (
 
 type userServerStatus struct {
 	Ready bool
+}
+
+type jupyterHubHTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *jupyterHubHTTPError) Error() string {
+	return fmt.Sprintf("JupyterHub API returned %d: %s", e.StatusCode, e.Body)
 }
 
 func (p *Plugin) startUserServer(ctx context.Context, cfg *runtimeConfiguration, channelID, rootID, userID string) error {
@@ -48,11 +58,17 @@ func (p *Plugin) startUserServerAndWait(ctx context.Context, cfg *runtimeConfigu
 		return fmt.Errorf("JupyterHub API token is not configured")
 	}
 	if err := p.jupyterHubRequest(ctx, cfg, http.MethodPost, "users", userID, "server"); err != nil {
-		return err
+		if !isJupyterHubAlreadyStartingOrRunning(err) {
+			return err
+		}
 	}
 
 	deadline := time.Now().Add(cfg.ServerStartTimeout)
 	for {
+		ready, progressErr := p.getUserServerProgressReady(ctx, cfg, userID)
+		if progressErr == nil && ready {
+			return nil
+		}
 		status, err := p.getUserServerStatus(ctx, cfg, userID)
 		if err == nil && status.Ready {
 			return nil
@@ -101,6 +117,44 @@ func jupyterHubUserServerReady(payload map[string]any) bool {
 	return false
 }
 
+func (p *Plugin) getUserServerProgressReady(ctx context.Context, cfg *runtimeConfiguration, userID string) (bool, error) {
+	body, err := p.jupyterHubRequestBody(ctx, cfg, http.MethodGet, "users", userID, "server", "progress")
+	if err != nil {
+		return false, err
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return false, nil
+	}
+	if strings.Contains(trimmed, `"ready": true`) || strings.Contains(trimmed, `"ready":true`) {
+		return true, nil
+	}
+	if strings.Contains(strings.ToLower(trimmed), `"progress": 100`) || strings.Contains(strings.ToLower(trimmed), `"progress":100`) {
+		return true, nil
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(body, &items); err == nil {
+		for _, item := range items {
+			if ready, ok := item["ready"].(bool); ok && ready {
+				return true, nil
+			}
+			if progress, ok := item["progress"].(float64); ok && progress >= 100 {
+				return true, nil
+			}
+		}
+	}
+	var item map[string]any
+	if err := json.Unmarshal(body, &item); err == nil {
+		if ready, ok := item["ready"].(bool); ok && ready {
+			return true, nil
+		}
+		if progress, ok := item["progress"].(float64); ok && progress >= 100 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (p *Plugin) jupyterHubRequest(ctx context.Context, cfg *runtimeConfiguration, method string, segments ...string) error {
 	_, err := p.jupyterHubRequestBody(ctx, cfg, method, segments...)
 	return err
@@ -110,7 +164,10 @@ func (p *Plugin) jupyterHubRequestBody(ctx context.Context, cfg *runtimeConfigur
 	endpoint := *cfg.JupyterHubAPIBaseURL
 	endpoint.Path = joinURLPath(endpoint.Path, segments...)
 
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), nil)
+	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(requestCtx, method, endpoint.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +182,27 @@ func (p *Plugin) jupyterHubRequestBody(ctx context.Context, cfg *runtimeConfigur
 
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
 	if response.StatusCode >= http.StatusBadRequest {
-		return body, fmt.Errorf("JupyterHub API returned %d", response.StatusCode)
+		return body, &jupyterHubHTTPError{
+			StatusCode: response.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 	return body, nil
+}
+
+func isJupyterHubAlreadyStartingOrRunning(err error) bool {
+	var httpErr *jupyterHubHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	if httpErr.StatusCode != http.StatusBadRequest && httpErr.StatusCode != http.StatusConflict {
+		return false
+	}
+	body := strings.ToLower(httpErr.Body)
+	return strings.Contains(body, "pending") ||
+		strings.Contains(body, "already") ||
+		strings.Contains(body, "running") ||
+		strings.Contains(body, "spawn")
 }
 
 func buildURL(base *url.URL, segments ...string) string {
