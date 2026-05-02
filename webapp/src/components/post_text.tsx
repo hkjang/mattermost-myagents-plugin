@@ -210,6 +210,14 @@ function ensureStreamingStyles() {
 .${markdownBodyClassName} .post-code {
     max-width: 100%;
     overflow-x: auto;
+    white-space: pre;
+}
+
+.${markdownBodyClassName} pre code,
+.${markdownBodyClassName} .post-code code {
+    display: block;
+    min-width: max-content;
+    white-space: pre;
 }
 
 .${markdownBodyClassName} img {

@@ -147,6 +147,53 @@ func TestSplitThinkBlocksCompletesEachClosingThinkTag(t *testing.T) {
 	}
 }
 
+func TestFinalOpenCodeMessageKeepsThinkingAndTools(t *testing.T) {
+	state := openCodeStreamState{
+		Text: "<think>계획 수립</think>",
+		Tools: []string{
+			renderToolBlock("bash go test ./... (completed)", "", "ok\t./server\t0.1s"),
+		},
+	}
+
+	final := finalOpenCodeMessageOrEmpty(state)
+
+	if strings.Contains(final, "응답이 비어 있습니다.") {
+		t.Fatalf("final message was treated as empty: %q", final)
+	}
+	if !strings.Contains(final, "계획 수립") {
+		t.Fatalf("final message does not include thinking: %q", final)
+	}
+	if !strings.Contains(final, "go test ./...") || !strings.Contains(final, "ok\t./server") {
+		t.Fatalf("final message does not include tool output: %q", final)
+	}
+}
+
+func TestRenderToolPartIncludesTerminalOutput(t *testing.T) {
+	rendered := renderToolPart(map[string]any{
+		"id":   "part_tool",
+		"type": "tool",
+		"tool": "bash",
+		"state": map[string]any{
+			"status": "completed",
+			"title":  "npm test",
+			"output": "\x1b[31mFAIL\x1b[0m\n```inside output```",
+		},
+	})
+
+	if !strings.Contains(rendered, "터미널 출력") {
+		t.Fatalf("rendered tool part does not include output label: %q", rendered)
+	}
+	if strings.Contains(rendered, "\x1b") {
+		t.Fatalf("rendered tool part still contains ANSI escapes: %q", rendered)
+	}
+	if !strings.Contains(rendered, "````console") {
+		t.Fatalf("rendered tool part did not expand markdown fence: %q", rendered)
+	}
+	if !strings.Contains(rendered, "FAIL") || !strings.Contains(rendered, "inside output") {
+		t.Fatalf("rendered tool part lost terminal text: %q", rendered)
+	}
+}
+
 func mustOpenCodeEvent(t *testing.T, value map[string]any) openCodeSSEEvent {
 	t.Helper()
 	body, err := json.Marshal(value)

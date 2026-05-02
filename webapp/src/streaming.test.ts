@@ -65,7 +65,7 @@ test('buildStreamingPostUpdate updates only streaming Langflow posts', () => {
 
     expect(updatedPost).toBeTruthy();
     expect(updatedPost?.message).toBe('streamed reply');
-    expect(updatedPost?.props?.langflow_stream_status).toBe('streaming');
+    expect(updatedPost?.props?.myagents_stream_status).toBe('streaming');
 });
 
 test('buildStreamingPostUpdate ignores non-streaming posts', () => {

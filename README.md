@@ -24,7 +24,7 @@ The default mapping uses the Mattermost username, lowercases it, converts dots/u
 
 The plugin creates an opencode session with `POST /session`, stores the returned session ID in the Mattermost Plugin KV Store, sends prompts through `POST /session/:id/prompt_async`, and streams responses from `GET /event`.
 
-Both official opencode bus events such as `message.part.updated` and wrapper-style SSE events such as `message_start`, `message_delta`, and `message_end` are handled. Reasoning parts and Qwen-style `<think>` / `</think>` output are shown as temporary thinking panels that fade out as the final answer appears.
+Both official opencode bus events such as `message.part.updated` and wrapper-style SSE events such as `message_start`, `message_delta`, and `message_end` are handled. Reasoning parts, Qwen-style `<think>` / `</think>` output, tool calls, terminal output, and file/source parts remain visible with the final answer.
 
 ## JupyterHub Integration
 

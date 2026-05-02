@@ -60,7 +60,7 @@ export default function MyAgentsBotPost(props: Props) {
     return (
         <div className='myagents-post'>
             {parsed.thinking.map((item, index) => (
-                <div className={`myagents-thinking-panel ${item.complete || !streaming ? 'myagents-thinking-fade' : ''}`} key={`${props.post.id}-thinking-${index}`}>
+                <div className='myagents-thinking-panel' key={`${props.post.id}-thinking-${index}`}>
                     <div className='myagents-thinking-label'>{'Thinking'}</div>
                     <PostText
                         channelID={props.post.channel_id}
@@ -84,12 +84,11 @@ function isStreaming(post: any) {
 }
 
 function splitThinking(message: string) {
-    const thinking: Array<{text: string; complete: boolean}> = [];
+    const thinking: Array<{text: string}> = [];
     let body = message;
     const pattern = /<div class="myagents-thinking(?: myagents-thinking-complete)?">([\s\S]*?)<\/div>\s*/g;
-    body = body.replace(pattern, (full, content) => {
+    body = body.replace(pattern, (_full, content) => {
         thinking.push({
-            complete: full.includes('myagents-thinking-complete'),
             text: String(content || '').trim(),
         });
         return '';
@@ -115,17 +114,7 @@ function injectStyles() {
     border-radius: 6px;
     color: rgba(var(--center-channel-color-rgb), 0.72);
     padding: 8px 10px;
-    max-height: 420px;
-    overflow: hidden;
-    transition: opacity 160ms ease-out 900ms, max-height 260ms ease-in 920ms, margin 260ms ease-in 920ms, padding 260ms ease-in 920ms;
-}
-.myagents-thinking-fade {
-    max-height: 0;
-    margin: 0;
-    opacity: 0;
-    overflow: hidden;
-    padding-bottom: 0;
-    padding-top: 0;
+    overflow-x: auto;
 }
 .myagents-thinking-label {
     font-size: 11px;

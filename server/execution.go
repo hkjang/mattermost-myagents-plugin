@@ -315,7 +315,7 @@ func (u *myAgentsStreamingUpdater) complete(message string) error {
 	updated.Props["myagents_streaming"] = "false"
 	updated.Props["myagents_stream_status"] = "completed"
 	updated.Props["myagents_stream_placeholder"] = "false"
-	updated.Props["myagents_thinking"] = "fadeout"
+	updated.Props["myagents_thinking"] = boolString(strings.Contains(message, "myagents-thinking"))
 	post, appErr := u.plugin.API.UpdatePost(&updated)
 	if appErr != nil {
 		return fmt.Errorf("failed to complete myagents streaming post: %w", appErr)
