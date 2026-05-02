@@ -296,7 +296,7 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 
 	envelope := normalizeOpenCodeEventPayload(payload)
 	if envelope == nil {
-		if eventName == "message.part.updated" || eventName == "message.part.delta" || eventName == "message.updated" || eventName == "session.idle" || eventName == "session.error" {
+		if eventName == "message.part.updated" || eventName == "message.part.delta" || eventName == "message.updated" || eventName == "session.idle" || eventName == "session.status_changed" || eventName == "session.error" {
 			envelope = map[string]any{
 				"type":       eventName,
 				"properties": payload,
@@ -370,17 +370,20 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 		}
 		if text := extractOpenCodeTextFromEventProperties(props); text != "" {
 			state.Text = text
+			return true
 		}
-		if stringValue(info["role"]) == "assistant" {
-			if timeInfo, ok := info["time"].(map[string]any); ok && timeInfo["completed"] != nil {
-				state.Done = true
-				return true
-			}
-		}
+		return false
 	case "session.idle":
 		if props != nil && stringValue(props["sessionID"]) == sessionID {
 			state.Done = true
 			return true
+		}
+	case "session.status_changed":
+		if props != nil && stringValue(props["sessionID"]) == sessionID {
+			if strings.EqualFold(stringValue(props["status"]), "idle") {
+				state.Done = true
+				return true
+			}
 		}
 	case "session.error":
 		if props == nil || stringValue(props["sessionID"]) == sessionID {
