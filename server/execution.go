@@ -241,9 +241,17 @@ func isBotNotFoundError(err error) bool {
 		strings.Contains(lower, "unable to get bot")
 }
 
+const myAgentsPostSafetyMargin = 256
+const myAgentsPostFallbackMaxRunes = 4000
+
 type myAgentsStreamingUpdater struct {
-	plugin *Plugin
-	post   *model.Post
+	plugin       *Plugin
+	botUserID    string
+	channelID    string
+	rootID       string
+	post         *model.Post
+	maxRunes     int
+	flushedTools int
 }
 
 func (p *Plugin) createMyAgentsStreamingPost(channelID, rootID string) (*myAgentsStreamingUpdater, error) {
@@ -254,8 +262,28 @@ func (p *Plugin) createMyAgentsStreamingPost(channelID, rootID string) (*myAgent
 	if err := p.ensureBotInChannel(channelID, account.UserID); err != nil {
 		return nil, err
 	}
+	post, err := p.createMyAgentsBotPost(account.UserID, channelID, rootID)
+	if err != nil {
+		return nil, err
+	}
+	updater := &myAgentsStreamingUpdater{
+		plugin:    p,
+		botUserID: account.UserID,
+		channelID: channelID,
+		rootID:    rootID,
+		post:      post,
+		maxRunes:  p.maxPostRunes() - myAgentsPostSafetyMargin,
+	}
+	if updater.maxRunes < 1024 {
+		updater.maxRunes = 1024
+	}
+	updater.publish("start", post.Message)
+	return updater, nil
+}
+
+func (p *Plugin) createMyAgentsBotPost(botUserID, channelID, rootID string) (*model.Post, error) {
 	post, appErr := p.API.CreatePost(&model.Post{
-		UserId:    account.UserID,
+		UserId:    botUserID,
 		ChannelId: channelID,
 		RootId:    rootID,
 		Type:      "custom_myagents_bot",
@@ -272,12 +300,18 @@ func (p *Plugin) createMyAgentsStreamingPost(channelID, rootID string) (*myAgent
 	if appErr != nil {
 		return nil, fmt.Errorf("failed to create myagents streaming post: %w", appErr)
 	}
-	updater := &myAgentsStreamingUpdater{plugin: p, post: post}
-	updater.publish("start", post.Message)
-	return updater, nil
+	return post, nil
+}
+
+func (p *Plugin) maxPostRunes() int {
+	return myAgentsPostFallbackMaxRunes
 }
 
 func (u *myAgentsStreamingUpdater) update(message, thinking string, streaming bool) error {
+	return u.writePost(message, thinking, streaming, "streaming")
+}
+
+func (u *myAgentsStreamingUpdater) writePost(message, thinking string, streaming bool, status string) error {
 	if u == nil || u.post == nil {
 		return nil
 	}
@@ -289,7 +323,7 @@ func (u *myAgentsStreamingUpdater) update(message, thinking string, streaming bo
 	updated.Message = message
 	updated.Props = clonePostProps(u.post.Props)
 	updated.Props["myagents_streaming"] = boolString(streaming)
-	updated.Props["myagents_stream_status"] = "streaming"
+	updated.Props["myagents_stream_status"] = status
 	updated.Props["myagents_stream_placeholder"] = "false"
 	updated.Props["myagents_thinking"] = boolString(strings.TrimSpace(thinking) != "")
 	post, appErr := u.plugin.API.UpdatePost(&updated)
@@ -299,6 +333,105 @@ func (u *myAgentsStreamingUpdater) update(message, thinking string, streaming bo
 	u.post = post
 	u.publish("delta", message)
 	return nil
+}
+
+func (u *myAgentsStreamingUpdater) updateState(text, thinking string, tools []string, streaming bool) error {
+	if u == nil {
+		return nil
+	}
+	for {
+		visibleTools := tools[u.flushedTools:]
+		message := renderStreamingMessage(text, thinking, visibleTools, streaming)
+		if u.fits(message) || len(visibleTools) <= 1 {
+			if !u.fits(message) {
+				message = truncateRunes(message, u.maxRunes)
+			}
+			return u.update(message, thinking, streaming)
+		}
+		// Rollover: finalize current post with all but the last tool, then start a new post.
+		keep := len(tools) - 1
+		chunk := tools[u.flushedTools:keep]
+		chunkMessage := renderStreamingMessage("", thinking, chunk, false)
+		if !u.fits(chunkMessage) {
+			chunkMessage = truncateRunes(chunkMessage, u.maxRunes)
+		}
+		if err := u.writePost(chunkMessage+"\n\n_(이어서)_", thinking, false, "completed"); err != nil {
+			return err
+		}
+		newPost, err := u.plugin.createMyAgentsBotPost(u.botUserID, u.channelID, u.rootID)
+		if err != nil {
+			return err
+		}
+		u.post = newPost
+		u.flushedTools = keep
+		u.publish("start", newPost.Message)
+	}
+}
+
+func (u *myAgentsStreamingUpdater) completeState(text, thinking string, tools []string) error {
+	if u == nil {
+		return nil
+	}
+	for {
+		visibleTools := tools[u.flushedTools:]
+		message := renderStreamingMessage(text, thinking, visibleTools, false)
+		if message == "" {
+			message = "응답이 비어 있습니다."
+		}
+		if u.fits(message) || len(visibleTools) <= 1 {
+			if !u.fits(message) {
+				message = truncateRunes(message, u.maxRunes)
+			}
+			return u.complete(message)
+		}
+		keep := len(tools) - 1
+		chunk := tools[u.flushedTools:keep]
+		chunkMessage := renderStreamingMessage("", thinking, chunk, false)
+		if !u.fits(chunkMessage) {
+			chunkMessage = truncateRunes(chunkMessage, u.maxRunes)
+		}
+		if err := u.writePost(chunkMessage+"\n\n_(이어서)_", thinking, false, "completed"); err != nil {
+			return err
+		}
+		newPost, err := u.plugin.createMyAgentsBotPost(u.botUserID, u.channelID, u.rootID)
+		if err != nil {
+			return err
+		}
+		u.post = newPost
+		u.flushedTools = keep
+		u.publish("start", newPost.Message)
+	}
+}
+
+func (u *myAgentsStreamingUpdater) fits(message string) bool {
+	if u.maxRunes <= 0 {
+		return true
+	}
+	count := 0
+	for range message {
+		count++
+		if count > u.maxRunes {
+			return false
+		}
+	}
+	return true
+}
+
+func truncateRunes(message string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return message
+	}
+	runes := []rune(message)
+	if len(runes) <= maxRunes {
+		return message
+	}
+	suffix := "\n\n…(잘림)"
+	cut := maxRunes - len([]rune(suffix))
+	if cut < 1 {
+		cut = maxRunes
+		suffix = ""
+	}
+	return string(runes[:cut]) + suffix
 }
 
 func (u *myAgentsStreamingUpdater) complete(message string) error {

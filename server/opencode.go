@@ -101,7 +101,7 @@ func (p *Plugin) streamOpenCodeMessage(ctx context.Context, cfg *runtimeConfigur
 		return "", err
 	}
 
-	streamCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	events, errs := p.openCodeEventStream(streamCtx, baseURL)
@@ -110,42 +110,66 @@ func (p *Plugin) streamOpenCodeMessage(ctx context.Context, cfg *runtimeConfigur
 		return "", err
 	}
 
+	idleTimeout := cfg.RequestTimeout
+	if idleTimeout < 2*time.Minute {
+		idleTimeout = 2 * time.Minute
+	}
+	idle := time.NewTimer(idleTimeout)
+	defer idle.Stop()
+	resetIdle := func() {
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
+		idle.Reset(idleTimeout)
+	}
+
 	state := openCodeStreamState{}
 	lastRendered := ""
 	for {
 		select {
+		case <-idle.C:
+			err := &openCodeCallError{Code: "timeout", Message: "응답 시간이 초과되었습니다"}
+			if final := finalOpenCodeMessage(state); final != "" {
+				return final, updater.completeState(state.Text, state.Thinking, state.Tools)
+			}
+			_ = updater.fail(userFacingOpenCodeError(err))
+			return "", err
 		case event, ok := <-events:
+			resetIdle()
 			if !ok {
 				final := finalOpenCodeMessageOrEmpty(state)
-				return final, updater.complete(final)
+				return final, updater.completeState(state.Text, state.Thinking, state.Tools)
 			}
 			if !applyOpenCodeSSEEvent(&state, sessionID, event) {
 				continue
 			}
 			rendered := renderStreamingMessage(state.Text, state.Thinking, state.Tools, !state.Done)
 			if rendered != "" && rendered != lastRendered {
-				if err := updater.update(rendered, state.Thinking, !state.Done); err != nil {
+				if err := updater.updateState(state.Text, state.Thinking, state.Tools, !state.Done); err != nil {
 					return "", err
 				}
 				lastRendered = rendered
 			}
 			if state.Done {
 				final := finalOpenCodeMessageOrEmpty(state)
-				return final, updater.complete(final)
+				return final, updater.completeState(state.Text, state.Thinking, state.Tools)
 			}
 		case err := <-errs:
 			if err == nil {
 				continue
 			}
 			if final := finalOpenCodeMessage(state); final != "" {
-				return final, updater.complete(final)
+				return final, updater.completeState(state.Text, state.Thinking, state.Tools)
 			}
 			_ = updater.fail(userFacingOpenCodeError(err))
 			return "", err
 		case <-streamCtx.Done():
 			err := classifyOpenCodeRequestError(streamCtx.Err())
 			if final := finalOpenCodeMessage(state); final != "" {
-				return final, updater.complete(final)
+				return final, updater.completeState(state.Text, state.Thinking, state.Tools)
 			}
 			_ = updater.fail(userFacingOpenCodeError(err))
 			return "", err
