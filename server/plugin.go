@@ -93,6 +93,18 @@ func (p *Plugin) handlePostedMessage(post *model.Post) error {
 	if appErr != nil {
 		return fmt.Errorf("failed to get channel: %w", appErr)
 	}
+
+	// DM 채널인 경우, myagents 봇이 해당 DM의 멤버인지 확인.
+	// 다른 플러그인(예: OCS)이 만든 봇과의 DM은 무시한다.
+	if channel.Type == model.ChannelTypeDirect {
+		if account.UserID == "" {
+			return nil
+		}
+		if !strings.Contains(channel.Name, account.UserID) {
+			return nil
+		}
+	}
+
 	user, appErr := p.API.GetUser(post.UserId)
 	if appErr != nil {
 		return fmt.Errorf("failed to get user: %w", appErr)
