@@ -146,6 +146,9 @@ func (p *Plugin) streamOpenCodeMessage(ctx context.Context, cfg *runtimeConfigur
 			if !applyOpenCodeSSEEvent(&state, sessionID, event) {
 				continue
 			}
+			if state.Done && strings.Contains(state.Text, "개인 에이전트 서버 오류") {
+				p.API.LogError("OpenCode session.error received", "session_id", sessionID, "error_text", state.Text, "raw_event", string(event.Data))
+			}
 			rendered := renderStreamingMessage(state.Text, state.Thinking, state.Tools, !state.Done)
 			if rendered != "" && rendered != lastRendered {
 				if err := updater.updateState(state.Text, state.Thinking, state.Tools, !state.Done); err != nil {
@@ -411,7 +414,23 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 		}
 	case "session.error":
 		if props == nil || stringValue(props["sessionID"]) == sessionID {
-			state.Text = "개인 에이전트 서버 오류입니다"
+			errMsg := stringValue(props["error"])
+			if errMsg == "" {
+				errMsg = stringValue(props["message"])
+			}
+			if errMsg == "" {
+				if errData, ok := props["data"].(map[string]any); ok {
+					errMsg = stringValue(errData["message"])
+					if errMsg == "" {
+						errMsg = stringValue(errData["error"])
+					}
+				}
+			}
+			if errMsg != "" {
+				state.Text = fmt.Sprintf("개인 에이전트 서버 오류입니다: %s", errMsg)
+			} else {
+				state.Text = "개인 에이전트 서버 오류입니다"
+			}
 			state.Done = true
 			return true
 		}

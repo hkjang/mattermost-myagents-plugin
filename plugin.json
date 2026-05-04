@@ -1,7 +1,7 @@
 {
     "id": "com.mattermost.myagents",
     "name": "mattermost-myagents-plugin",
-    "version": "0.1.26",
+    "version": "0.1.27",
     "description": "Mattermost users talk to their personal myagents/opencode agent through @myagents.",
     "homepage_url": "https://github.com/hkjang/mattermost-myagents-plugin",
     "support_url": "https://github.com/hkjang/mattermost-myagents-plugin/issues",
