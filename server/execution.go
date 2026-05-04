@@ -178,6 +178,13 @@ func buildSessionKey(msg incomingMessage, mappedUserID string) string {
 
 func (p *Plugin) resetSessionID(ctx context.Context, cfg *runtimeConfiguration, baseURL string, msg incomingMessage, mappedUserID string) (string, error) {
 	key := buildSessionKey(msg, mappedUserID)
+	// Best-effort: try to delete the previously stored session on the opencode server
+	// so leftover sessions with bad model configs don't accumulate.
+	if previous, _ := p.API.KVGet(sessionKeyPrefix + key); len(previous) > 0 {
+		if err := p.deleteOpenCodeSession(ctx, cfg, baseURL, string(previous)); err != nil {
+			p.API.LogWarn("Failed to delete previous opencode session", "session_id", string(previous), "error", err.Error())
+		}
+	}
 	sessionID, err := p.createOpenCodeSession(ctx, cfg, baseURL, buildSessionTitle(msg, mappedUserID))
 	if err != nil {
 		return "", err
@@ -186,6 +193,15 @@ func (p *Plugin) resetSessionID(ctx context.Context, cfg *runtimeConfiguration, 
 		return "", fmt.Errorf("failed to save session: %w", appErr)
 	}
 	return sessionID, nil
+}
+
+func (p *Plugin) getStoredSessionID(msg incomingMessage, mappedUserID string) (string, error) {
+	key := buildSessionKey(msg, mappedUserID)
+	stored, appErr := p.API.KVGet(sessionKeyPrefix + key)
+	if appErr != nil {
+		return "", fmt.Errorf("failed to load session: %w", appErr)
+	}
+	return string(stored), nil
 }
 
 func buildSessionTitle(msg incomingMessage, mappedUserID string) string {

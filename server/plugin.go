@@ -218,6 +218,12 @@ func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfigu
 			return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버가 켜져 있습니다.")
 		}
 		return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버가 꺼져 있습니다.")
+	case "session_reset":
+		return p.handleSessionReset(ctx, cfg, msg, domainUserID)
+	case "session_abort":
+		return p.handleSessionAbort(ctx, cfg, msg, domainUserID)
+	case "session_info":
+		return p.handleSessionInfo(msg, domainUserID)
 	}
 
 	status, err := p.getUserServerStatus(ctx, cfg, hubUserID)
@@ -266,6 +272,12 @@ func classifyUserCommand(prompt string) string {
 		return "stop"
 	case "상태 알려줘":
 		return "status"
+	case "새 세션", "세션 초기화", "초기화", "세션 새로", "세션 리셋", "리셋", "reset", "/reset", "new session", "/new":
+		return "session_reset"
+	case "중단", "취소", "세션 중단", "세션 취소", "abort", "/abort", "cancel", "/cancel", "stop":
+		return "session_abort"
+	case "세션 정보", "세션 상태", "세션 보기", "세션", "session", "/session":
+		return "session_info"
 	default:
 		return ""
 	}
@@ -276,7 +288,70 @@ func buildUsageMessage(botUsername string) string {
 		fmt.Sprintf("`@%s` 뒤에 질문을 입력하거나, 1:1 DM에서는 바로 질문을 보내주세요.", botUsername),
 		"",
 		"서버 제어: `켜줘`, `서버 켜줘`, `꺼줘`, `서버 꺼줘`, `상태 알려줘`",
+		"세션 관리: `세션 정보`, `세션 초기화` (모델 설정 문제 등으로 응답이 안 올 때), `중단` (진행 중 작업 취소)",
 	}, "\n")
+}
+
+const sessionResetHint = "현재 세션이 망가졌을 수 있습니다. `세션 초기화`라고 보내면 새 세션을 시작할 수 있습니다."
+
+func (p *Plugin) handleSessionReset(ctx context.Context, cfg *runtimeConfiguration, msg incomingMessage, domainUserID string) error {
+	baseURL := buildUserOpenCodeURL(domainUserID, cfg.BaseDomainSuffix)
+	previous, _ := p.getStoredSessionID(msg, domainUserID)
+	newSessionID, err := p.resetSessionID(ctx, cfg, baseURL, msg, domainUserID)
+	if err != nil {
+		return p.postText(msg.Channel.Id, msg.RootID, "세션 초기화에 실패했습니다: "+userFacingOpenCodeError(err))
+	}
+	body := fmt.Sprintf("새 세션을 시작했습니다.\n- 새 세션 ID: `%s`", newSessionID)
+	if previous != "" && previous != newSessionID {
+		body += fmt.Sprintf("\n- 이전 세션 ID: `%s` (정리됨)", previous)
+	}
+	body += "\n\n다시 질문을 보내주세요."
+	return p.postText(msg.Channel.Id, msg.RootID, body)
+}
+
+func (p *Plugin) handleSessionAbort(ctx context.Context, cfg *runtimeConfiguration, msg incomingMessage, domainUserID string) error {
+	sessionID, err := p.getStoredSessionID(msg, domainUserID)
+	if err != nil {
+		return p.postText(msg.Channel.Id, msg.RootID, "세션 정보를 불러오지 못했습니다.")
+	}
+	if sessionID == "" {
+		return p.postText(msg.Channel.Id, msg.RootID, "이 대화에는 진행 중인 세션이 없습니다.")
+	}
+	baseURL := buildUserOpenCodeURL(domainUserID, cfg.BaseDomainSuffix)
+	if err := p.abortOpenCodeSession(ctx, cfg, baseURL, sessionID); err != nil {
+		return p.postText(msg.Channel.Id, msg.RootID, "세션을 중단하지 못했습니다: "+userFacingOpenCodeError(err))
+	}
+	return p.postText(msg.Channel.Id, msg.RootID, fmt.Sprintf("세션 `%s`의 진행 중 작업을 중단했습니다.", sessionID))
+}
+
+func (p *Plugin) handleSessionInfo(msg incomingMessage, domainUserID string) error {
+	sessionID, err := p.getStoredSessionID(msg, domainUserID)
+	if err != nil {
+		return p.postText(msg.Channel.Id, msg.RootID, "세션 정보를 불러오지 못했습니다.")
+	}
+	scope := "DM"
+	if msg.Channel != nil && !msg.IsDM {
+		if msg.RootID != "" {
+			scope = fmt.Sprintf("스레드(루트 `%s`)", msg.RootID)
+		} else {
+			channelName := msg.Channel.Name
+			if channelName == "" {
+				channelName = msg.Channel.Id
+			}
+			scope = "채널 `" + channelName + "`"
+		}
+	}
+	if sessionID == "" {
+		body := fmt.Sprintf("이 %s에는 아직 세션이 없습니다. 첫 질문을 보내면 자동으로 생성됩니다.", scope)
+		return p.postText(msg.Channel.Id, msg.RootID, body)
+	}
+	body := strings.Join([]string{
+		fmt.Sprintf("- 스코프: %s", scope),
+		fmt.Sprintf("- 세션 ID: `%s`", sessionID),
+		"",
+		"명령어: `세션 초기화` (새 세션), `중단` (진행 중 작업 취소)",
+	}, "\n")
+	return p.postText(msg.Channel.Id, msg.RootID, body)
 }
 
 func (p *Plugin) postText(channelID, rootID, message string) error {

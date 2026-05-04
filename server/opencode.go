@@ -184,6 +184,40 @@ func (p *Plugin) sendOpenCodeMessage(ctx context.Context, cfg *runtimeConfigurat
 	return p.sendOpenCodePrompt(ctx, baseURL, sessionID, "message", prompt, cfg.RequestTimeout)
 }
 
+// abortOpenCodeSession asks opencode to abort an in-flight prompt for the given session.
+// POST /session/{id}/abort
+func (p *Plugin) abortOpenCodeSession(ctx context.Context, cfg *runtimeConfiguration, baseURL, sessionID string) error {
+	endpoint, err := openCodeURL(baseURL, "session", sessionID, "abort")
+	if err != nil {
+		return err
+	}
+	_, statusCode, err := p.doOpenCodeJSON(ctx, http.MethodPost, endpoint, []byte("{}"), cfg.RequestTimeout)
+	if err != nil {
+		return err
+	}
+	if statusCode >= http.StatusBadRequest {
+		return classifyOpenCodeHTTPError(statusCode)
+	}
+	return nil
+}
+
+// deleteOpenCodeSession removes a session from the opencode server.
+// DELETE /session/{id}
+func (p *Plugin) deleteOpenCodeSession(ctx context.Context, cfg *runtimeConfiguration, baseURL, sessionID string) error {
+	endpoint, err := openCodeURL(baseURL, "session", sessionID)
+	if err != nil {
+		return err
+	}
+	_, statusCode, err := p.doOpenCodeJSON(ctx, http.MethodDelete, endpoint, nil, cfg.RequestTimeout)
+	if err != nil {
+		return err
+	}
+	if statusCode >= http.StatusBadRequest && statusCode != http.StatusNotFound {
+		return classifyOpenCodeHTTPError(statusCode)
+	}
+	return nil
+}
+
 func (p *Plugin) sendOpenCodeAsync(ctx context.Context, cfg *runtimeConfiguration, baseURL, sessionID, prompt string) error {
 	_, err := p.sendOpenCodePrompt(ctx, baseURL, sessionID, "prompt_async", prompt, cfg.RequestTimeout)
 	return err
@@ -431,6 +465,7 @@ func applyOpenCodeSSEEvent(state *openCodeStreamState, sessionID string, event o
 			} else {
 				state.Text = "개인 에이전트 서버 오류입니다"
 			}
+			state.Text += "\n\n" + sessionResetHint
 			state.Done = true
 			return true
 		}
