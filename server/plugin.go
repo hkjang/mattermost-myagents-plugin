@@ -189,10 +189,13 @@ func responseRootID(post *model.Post, channel *model.Channel) string {
 }
 
 func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfiguration, msg incomingMessage) error {
-	userID, err := resolveMappedUserID(msg.User, cfg)
+	// domainUserID: OpenCode 서브도메인용 (sj.lee → sj-lee)
+	domainUserID, err := resolveMappedUserID(msg.User, cfg)
 	if err != nil {
 		return p.postText(msg.Channel.Id, msg.RootID, "사용자 ID를 도메인으로 변환할 수 없습니다. 관리자에게 문의해주세요.")
 	}
+	// hubUserID: JupyterHub API용 원본 username (sj.lee 그대로)
+	hubUserID := strings.ToLower(strings.TrimSpace(msg.User.Username))
 
 	command := classifyUserCommand(msg.Prompt)
 	switch command {
@@ -200,14 +203,14 @@ func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfigu
 		if !cfg.AllowUserStartServer {
 			return p.postText(msg.Channel.Id, msg.RootID, "서버 시작 기능이 비활성화되어 있습니다.")
 		}
-		return p.startUserServer(ctx, cfg, msg.Channel.Id, msg.RootID, userID)
+		return p.startUserServer(ctx, cfg, msg.Channel.Id, msg.RootID, hubUserID)
 	case "stop":
 		if !cfg.AllowUserStopServer {
 			return p.postText(msg.Channel.Id, msg.RootID, "서버 중지 기능이 비활성화되어 있습니다.")
 		}
-		return p.stopUserServer(ctx, cfg, msg.Channel.Id, msg.RootID, userID)
+		return p.stopUserServer(ctx, cfg, msg.Channel.Id, msg.RootID, hubUserID)
 	case "status":
-		status, err := p.getUserServerStatus(ctx, cfg, userID)
+		status, err := p.getUserServerStatus(ctx, cfg, hubUserID)
 		if err != nil {
 			return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버 상태를 확인할 수 없습니다.")
 		}
@@ -217,7 +220,7 @@ func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfigu
 		return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버가 꺼져 있습니다.")
 	}
 
-	status, err := p.getUserServerStatus(ctx, cfg, userID)
+	status, err := p.getUserServerStatus(ctx, cfg, hubUserID)
 	if err != nil {
 		return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버 상태를 확인할 수 없습니다.")
 	}
@@ -225,13 +228,13 @@ func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfigu
 		if !cfg.AutoStartServer {
 			return p.postText(msg.Channel.Id, msg.RootID, "서버를 먼저 켜주세요. `켜줘` 또는 `서버 켜줘`라고 보내면 시작할 수 있습니다.")
 		}
-		if err := p.startUserServerAndWait(ctx, cfg, userID); err != nil {
+		if err := p.startUserServerAndWait(ctx, cfg, hubUserID); err != nil {
 			return p.postText(msg.Channel.Id, msg.RootID, "개인 에이전트 서버를 시작할 수 없습니다.")
 		}
 	}
 
-	baseURL := buildUserOpenCodeURL(userID, cfg.BaseDomainSuffix)
-	sessionID, err := p.getOrCreateSessionID(ctx, cfg, baseURL, msg, userID)
+	baseURL := buildUserOpenCodeURL(domainUserID, cfg.BaseDomainSuffix)
+	sessionID, err := p.getOrCreateSessionID(ctx, cfg, baseURL, msg, domainUserID)
 	if err != nil {
 		return p.postText(msg.Channel.Id, msg.RootID, userFacingOpenCodeError(err))
 	}
@@ -239,7 +242,7 @@ func (p *Plugin) processMyAgentsMessage(ctx context.Context, cfg *runtimeConfigu
 	if err != nil {
 		var callErr *openCodeCallError
 		if errors.As(err, &callErr) && callErr.StatusCode == http.StatusNotFound {
-			if newSessionID, resetErr := p.resetSessionID(ctx, cfg, baseURL, msg, userID); resetErr == nil {
+			if newSessionID, resetErr := p.resetSessionID(ctx, cfg, baseURL, msg, domainUserID); resetErr == nil {
 				output, err = p.streamOpenCodeMessage(ctx, cfg, baseURL, newSessionID, msg.Channel.Id, msg.RootID, msg.Prompt)
 			}
 		}
